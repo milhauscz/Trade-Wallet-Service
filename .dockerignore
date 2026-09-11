@@ -1,0 +1,12 @@
+.gradle
+build
+.git
+.idea
+.kotlin
+*.iml
+.vscode
+src/test
+HELP.md
+README.md
+docker-compose.yml
+.dockerignore

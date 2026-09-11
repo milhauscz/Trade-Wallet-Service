@@ -38,3 +38,9 @@ out/
 
 ### Kotlin ###
 .kotlin
+
+### Local ###
+.env
+
+### Local Cursor (not for remote) ###
+.cursor/rules/local-commits.mdc

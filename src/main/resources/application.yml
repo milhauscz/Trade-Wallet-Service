@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: trade-wallet-service
+  profiles:
+    default: local
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  kafka:
+    consumer:
+      group-id: trade-wallet-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    listener:
+      ack-mode: record
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    defaults:
+      enabled: true
+
+app:
+  jwt:
+    secret: "local-only-hs256-secret-key-32b!"
+    issuer: trade-wallet-service
+    ttl: 1h
+  kafka:
+    orders-topic: orders
+    orders-dlt-topic: orders.DLT
+  outbox:
+    poll-interval: 1s
+    batch-size: 50
+  idempotency:
+    ttl: 24h
+    header-name: X-Idempotency-Key
+
+logging:
+  level:
+    cz.cernilovsky.tradewalletservice: INFO

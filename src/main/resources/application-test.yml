@@ -1,0 +1,12 @@
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+app:
+  jwt:
+    secret: "test-only-hs256-secret-key-32byt"
+    issuer: trade-wallet-service
+    ttl: 1h
