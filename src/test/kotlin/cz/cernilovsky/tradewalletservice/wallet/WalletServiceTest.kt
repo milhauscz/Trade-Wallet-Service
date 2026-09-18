@@ -1,13 +1,20 @@
 package cz.cernilovsky.tradewalletservice.wallet
 
+import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsException
 import cz.cernilovsky.tradewalletservice.wallet.domain.WalletService
+import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletEntity
 import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletRepository
+import io.mockk.confirmVerified
+import io.mockk.every
 import io.mockk.impl.annotations.InjectMockKs
 import io.mockk.impl.annotations.MockK
 import io.mockk.junit5.MockKExtension
-import org.junit.jupiter.api.Disabled
+import io.mockk.verify
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
+import java.math.BigDecimal
+import kotlin.test.assertEquals
 
 /**
  * TODO(learning) Phase 1 — Unit-test reserve math without a database.
@@ -29,9 +36,44 @@ class WalletServiceTest {
     lateinit var walletService: WalletService
 
     @Test
-    @Disabled("TODO(learning): Phase 1 unit test reserve")
     fun reserveIncreasesReservedAmountWhenFundsAvailable() {
-        walletService.hashCode()
-        walletRepository.hashCode()
+        // given
+        val entity = WalletEntity(
+            userId = "5",
+            balance = BigDecimal(100),
+            reservedAmount = BigDecimal(40)
+        )
+        every {
+            walletRepository.findByUserIdForUpdate(any())
+        } returns entity
+        every {
+            walletRepository.save(any())
+        } answers { firstArg() }
+
+        // when
+        val reservedAmount = walletService.reserve("5", BigDecimal(10), BigDecimal(5))
+
+        // then
+        assertEquals(BigDecimal(50), reservedAmount)
+        assertEquals(entity.reservedAmount, BigDecimal(90))
+
+
+        // given
+        entity.reservedAmount = BigDecimal(40) // reset reserved amount
+
+        // then
+        assertThrows<InsufficientFundsException> {
+            walletService.reserve("5", BigDecimal(10), BigDecimal(7))
+        }
+        verify(exactly = 2) {
+            walletRepository.findByUserIdForUpdate("5")
+        }
+        verify(exactly = 0) {
+            walletRepository.findByUserId("5")
+        }
+        verify(exactly = 1) {
+            walletRepository.save(any())
+        }
+        confirmVerified(walletRepository)
     }
 }

@@ -8,8 +8,10 @@ import cz.cernilovsky.tradewalletservice.order.api.OrderResponse
 import cz.cernilovsky.tradewalletservice.order.api.UpdateOrderRequest
 import cz.cernilovsky.tradewalletservice.order.persistence.OrderEntity
 import cz.cernilovsky.tradewalletservice.order.persistence.OrderRepository
+import cz.cernilovsky.tradewalletservice.order.persistence.OrderStatus
 import cz.cernilovsky.tradewalletservice.outbox.domain.OutboxService
 import cz.cernilovsky.tradewalletservice.wallet.domain.WalletService
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.util.UUID
@@ -45,8 +47,23 @@ class OrderService(
      * Transaction boundary: wallet row lock + order insert + outbox insert commit together.
      * If any step fails, all three roll back.
      */
+    @Transactional
     fun create(userId: String, idempotencyKey: String, request: CreateOrderRequest): OrderResponse {
-        throw NotImplementedYetException("OrderService.create")
+        val existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey)
+        if (existing != null) return existing.toResponse()
+
+        walletService.reserve(userId, request.price, request.quantity)
+        val order = OrderEntity(
+            userId = userId,
+            idempotencyKey = idempotencyKey,
+            quantity = request.quantity,
+            price = request.price,
+            symbol = request.symbol,
+            stopLoss = request.stopLoss,
+            status = OrderStatus.PENDING
+        )
+        orderRepository.saveAndFlush(order)
+        return order.toResponse()
     }
 
     /**

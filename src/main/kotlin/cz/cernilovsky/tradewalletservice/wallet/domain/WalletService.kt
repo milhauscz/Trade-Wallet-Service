@@ -1,5 +1,6 @@
 package cz.cernilovsky.tradewalletservice.wallet.domain
 
+import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsException
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import cz.cernilovsky.tradewalletservice.wallet.api.WalletResponse
@@ -45,8 +46,14 @@ class WalletService(
      * Interview check: two threads entering this method for the same `userId` — the second
      * waits on the row lock until the first transaction commits or rolls back.
      */
+    @Transactional
     fun reserve(userId: String, price: BigDecimal, quantity: BigDecimal): BigDecimal {
-        throw NotImplementedYetException("WalletService.reserve")
+        val wallet = walletRepository.findByUserIdForUpdate(userId) ?: throw ResourceNotFoundException("Wallet", userId)
+        val required = price * quantity
+        if (wallet.available() < required) throw InsufficientFundsException(wallet.available().toString(), required.toString())
+        wallet.reservedAmount = wallet.reservedAmount.add(required)
+        walletRepository.save(wallet)
+        return required
     }
 
     /**
