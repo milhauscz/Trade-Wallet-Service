@@ -6,8 +6,10 @@ import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsExcep
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import jakarta.validation.ConstraintViolationException
+import org.hibernate.annotations.OptimisticLocking
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
+import org.springframework.orm.ObjectOptimisticLockingFailureException
 import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.MissingRequestHeaderException
 import org.springframework.web.bind.annotation.ExceptionHandler
@@ -46,6 +48,11 @@ class GlobalExceptionHandler {
     fun handleConstraintViolation(ex: ConstraintViolationException): ResponseEntity<ApiError> {
         val details = ex.constraintViolations.map { "${it.propertyPath}: ${it.message}" }
         return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Request validation failed", details)
+    }
+
+    @ExceptionHandler(ObjectOptimisticLockingFailureException::class)
+    fun handleOptimisticLockingException(ex: ObjectOptimisticLockingFailureException): ResponseEntity<ApiError> {
+        return error(HttpStatus.CONFLICT, "OPTIMISTIC_LOCK", "Reload the order and retry with the current version")
     }
 
     /**

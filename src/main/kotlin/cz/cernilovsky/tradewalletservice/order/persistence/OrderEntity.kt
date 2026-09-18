@@ -8,6 +8,7 @@ import jakarta.persistence.Id
 import jakarta.persistence.PrePersist
 import jakarta.persistence.PreUpdate
 import jakarta.persistence.Table
+import jakarta.persistence.Version
 import java.math.BigDecimal
 import java.time.Instant
 import java.util.UUID
@@ -41,6 +42,7 @@ class OrderEntity(
      * until you add `@Version` in Phase 2 — a plain field is just another column.
      */
     @Column(nullable = false)
+    @Version
     var version: Long = 0,
 ) {
     @PrePersist

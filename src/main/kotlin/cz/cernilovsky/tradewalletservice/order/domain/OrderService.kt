@@ -1,5 +1,6 @@
 package cz.cernilovsky.tradewalletservice.order.domain
 
+import cz.cernilovsky.tradewalletservice.common.exception.BadRequestException
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import cz.cernilovsky.tradewalletservice.config.KafkaTopicsProperties
@@ -11,6 +12,7 @@ import cz.cernilovsky.tradewalletservice.order.persistence.OrderRepository
 import cz.cernilovsky.tradewalletservice.order.persistence.OrderStatus
 import cz.cernilovsky.tradewalletservice.outbox.domain.OutboxService
 import cz.cernilovsky.tradewalletservice.wallet.domain.WalletService
+import jakarta.persistence.EntityManager
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -23,6 +25,7 @@ class OrderService(
     private val walletService: WalletService,
     private val outboxService: OutboxService,
     private val kafkaTopicsProperties: KafkaTopicsProperties,
+    private val entityManager: EntityManager
 ) {
     @Transactional(readOnly = true)
     fun get(userId: String, orderId: UUID): OrderResponse =
@@ -83,8 +86,21 @@ class OrderService(
      * Do not change reserved wallet funds when only price changes in this exercise
      * (keeps the locking lesson focused). Mention the product gap in a code comment.
      */
+    @Transactional
     fun update(userId: String, orderId: UUID, request: UpdateOrderRequest): OrderResponse {
-        throw NotImplementedYetException("OrderService.update")
+        val order = orderRepository.findByIdAndUserId(
+            id = orderId,
+            userId = userId
+        ) ?: throw ResourceNotFoundException("Order", orderId)
+
+        if (order.status != OrderStatus.PENDING) throw BadRequestException("Order's status should be ${OrderStatus.PENDING}, actual status is ${order.status}.")
+
+        entityManager.detach(order)
+        order.version = request.version
+        request.price?.let { order.price = it }
+        request.stopLoss?.let { order.stopLoss = it }
+        // we intentionally do not change wallet funds - lesson focused on locking
+        return orderRepository.saveAndFlush(order).toResponse()
     }
 
     private fun OrderEntity.toResponse() = OrderResponse(
