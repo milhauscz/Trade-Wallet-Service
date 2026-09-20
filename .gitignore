@@ -41,6 +41,8 @@ out/
 
 ### Local ###
 .env
+internal_docs/*
 
 ### Local Cursor (not for remote) ###
 .cursor/rules/local-commits.mdc
+.cursor/commit-session
