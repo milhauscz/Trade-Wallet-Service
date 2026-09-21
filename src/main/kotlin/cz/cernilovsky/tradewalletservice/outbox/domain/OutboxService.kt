@@ -1,6 +1,7 @@
 package cz.cernilovsky.tradewalletservice.outbox.domain
 
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
+import cz.cernilovsky.tradewalletservice.outbox.persistence.OutboxEventEntity
 import cz.cernilovsky.tradewalletservice.outbox.persistence.OutboxEventRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -25,6 +26,11 @@ class OutboxService(
      */
     @Transactional
     fun enqueue(topic: String, aggregateId: String, payload: String) {
-        throw NotImplementedYetException("OutboxService.enqueue")
+        val outboxEventEntity = OutboxEventEntity(
+            topic = topic,
+            aggregateId = aggregateId,
+            payload = payload
+        )
+        outboxEventRepository.save(outboxEventEntity)
     }
 }

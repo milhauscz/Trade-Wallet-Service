@@ -1,10 +1,14 @@
 package cz.cernilovsky.tradewalletservice.messaging
 
 import org.slf4j.LoggerFactory
+import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
+import tools.jackson.databind.ObjectMapper
 
 @Component
-class OrderCreatedNotificationListener {
+class OrderCreatedNotificationListener(
+    private val objectMapper: ObjectMapper
+) {
     private val log = LoggerFactory.getLogger(javaClass)
 
     /**
@@ -22,7 +26,10 @@ class OrderCreatedNotificationListener {
      * - Offset commits after the listener returns (record ack-mode in application.yml).
      * - DLT is for poison pills; do not infinite-retry business bugs.
      */
+    @KafkaListener(topics = ["\${app.kafka.orders-topic}"], groupId = "trade-wallet-notifications")
     fun onOrderCreated(payload: String) {
-        log.debug("Listener stub received payload length={}", payload.length)
+        val event = objectMapper.readValue(payload, OrderCreatedEvent::class.java)
+        log.info("Order created - order ID: ${event.orderId}, user ID: ${event.userId}, symbol: ${event.symbol}")
+        if (event.symbol == "FAIL-DLT") throw RuntimeException("Wrong order symbol ${event.symbol}")
     }
 }

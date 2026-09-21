@@ -4,6 +4,7 @@ import cz.cernilovsky.tradewalletservice.common.exception.BadRequestException
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import cz.cernilovsky.tradewalletservice.config.KafkaTopicsProperties
+import cz.cernilovsky.tradewalletservice.messaging.OrderCreatedEvent
 import cz.cernilovsky.tradewalletservice.order.api.CreateOrderRequest
 import cz.cernilovsky.tradewalletservice.order.api.OrderResponse
 import cz.cernilovsky.tradewalletservice.order.api.UpdateOrderRequest
@@ -16,16 +17,17 @@ import jakarta.persistence.EntityManager
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import tools.jackson.databind.ObjectMapper
 import java.util.UUID
 
 @Service
-@Suppress("unused") // walletService, outboxService, kafkaTopicsProperties are for Phase 1/3
 class OrderService(
     private val orderRepository: OrderRepository,
     private val walletService: WalletService,
     private val outboxService: OutboxService,
     private val kafkaTopicsProperties: KafkaTopicsProperties,
-    private val entityManager: EntityManager
+    private val entityManager: EntityManager,
+    private val objectMapper: ObjectMapper
 ) {
     @Transactional(readOnly = true)
     fun get(userId: String, orderId: UUID): OrderResponse =
@@ -66,6 +68,20 @@ class OrderService(
             status = OrderStatus.PENDING
         )
         orderRepository.saveAndFlush(order)
+        outboxService.enqueue(
+            topic = kafkaTopicsProperties.ordersTopic,
+            aggregateId = order.id.toString(),
+            payload = objectMapper.writeValueAsString(
+                OrderCreatedEvent(
+                    orderId = order.id,
+                    userId = userId,
+                    symbol = order.symbol,
+                    price = order.price,
+                    quantity = order.quantity,
+                    createdAt = order.createdAt
+                )
+            )
+        )
         return order.toResponse()
     }
 
