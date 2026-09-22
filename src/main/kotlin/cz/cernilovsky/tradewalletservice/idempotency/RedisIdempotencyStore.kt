@@ -1,14 +1,16 @@
 package cz.cernilovsky.tradewalletservice.idempotency
 
-import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.config.IdempotencyProperties
 import org.springframework.data.redis.core.StringRedisTemplate
+import org.springframework.http.HttpStatusCode
 import org.springframework.stereotype.Component
+import tools.jackson.databind.ObjectMapper
 
 @Component
 class RedisIdempotencyStore(
     private val redis: StringRedisTemplate,
     private val properties: IdempotencyProperties,
+    private val objectMapper: ObjectMapper
 ) : IdempotencyStore {
     /**
      * TODO(learning) Phase 4 — Redis response cache.
@@ -32,14 +34,47 @@ class RedisIdempotencyStore(
      * in `OrderService.create` and still must not create a second order.
      */
     override fun get(userId: String, key: String): CachedHttpResponse? {
-        throw NotImplementedYetException("RedisIdempotencyStore.get")
+        val value = redis.opsForValue().get(createRedisKey(userId, key)) ?: return null
+        if (value == IDEMPOTENT_OPERATION_IN_PROGRESS_VALUE) return null
+        return objectMapper.readValue(value, CachedHttpResponse::class.java)
     }
 
     override fun tryBegin(userId: String, key: String): Boolean {
-        throw NotImplementedYetException("RedisIdempotencyStore.tryBegin")
+        return redis.opsForValue().setIfAbsent(
+            createRedisKey(userId, key),
+            IDEMPOTENT_OPERATION_IN_PROGRESS_VALUE,
+            properties.ttl
+        )
     }
 
-    override fun save(userId: String, key: String, response: CachedHttpResponse) {
-        throw NotImplementedYetException("RedisIdempotencyStore.save")
+    override fun processResponse(userId: String, key: String, response: CachedHttpResponse) {
+        val redisKey = createRedisKey(userId, key)
+        with(HttpStatusCode.valueOf(response.status)) {
+            when {
+                is2xxSuccessful || is4xxClientError -> storeCachedResponseToRedis(redisKey, response)
+                is5xxServerError -> removeCachedResponseFromRedis(redisKey)
+            }
+        }
+    }
+
+    private fun storeCachedResponseToRedis(
+        redisKey: String,
+        response: CachedHttpResponse
+    ) {
+        redis.opsForValue().set(
+            redisKey,
+            objectMapper.writeValueAsString(response),
+            properties.ttl
+        )
+    }
+
+    private fun removeCachedResponseFromRedis(redisKey: String) {
+        redis.delete(redisKey)
+    }
+
+    private fun createRedisKey(userId: String, key: String): String = "idempotency:$userId:$key"
+
+    companion object {
+        const val IDEMPOTENT_OPERATION_IN_PROGRESS_VALUE = "in-progress"
     }
 }

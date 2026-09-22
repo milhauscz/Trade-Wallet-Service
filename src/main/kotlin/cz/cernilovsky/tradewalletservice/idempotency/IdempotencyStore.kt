@@ -8,5 +8,5 @@ interface IdempotencyStore {
      */
     fun tryBegin(userId: String, key: String): Boolean
 
-    fun save(userId: String, key: String, response: CachedHttpResponse)
+    fun processResponse(userId: String, key: String, response: CachedHttpResponse)
 }

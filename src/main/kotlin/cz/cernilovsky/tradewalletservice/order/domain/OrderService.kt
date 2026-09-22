@@ -1,7 +1,6 @@
 package cz.cernilovsky.tradewalletservice.order.domain
 
 import cz.cernilovsky.tradewalletservice.common.exception.BadRequestException
-import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import cz.cernilovsky.tradewalletservice.config.KafkaTopicsProperties
 import cz.cernilovsky.tradewalletservice.messaging.OrderCreatedEvent
@@ -14,11 +13,12 @@ import cz.cernilovsky.tradewalletservice.order.persistence.OrderStatus
 import cz.cernilovsky.tradewalletservice.outbox.domain.OutboxService
 import cz.cernilovsky.tradewalletservice.wallet.domain.WalletService
 import jakarta.persistence.EntityManager
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import tools.jackson.databind.ObjectMapper
-import java.util.UUID
+import java.util.*
 
 @Service
 class OrderService(
@@ -27,12 +27,21 @@ class OrderService(
     private val outboxService: OutboxService,
     private val kafkaTopicsProperties: KafkaTopicsProperties,
     private val entityManager: EntityManager,
-    private val objectMapper: ObjectMapper
+    private val objectMapper: ObjectMapper,
+    private val self: ObjectProvider<OrderService>
 ) {
     @Transactional(readOnly = true)
     fun get(userId: String, orderId: UUID): OrderResponse =
         orderRepository.findByIdAndUserId(orderId, userId)?.toResponse()
             ?: throw ResourceNotFoundException("Order", orderId)
+
+    fun create(userId: String, idempotencyKey: String, request: CreateOrderRequest): OrderResponse {
+        return try {
+            self.getObject().createInTx(userId, idempotencyKey, request)
+        } catch (e: DataIntegrityViolationException) {
+            orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey)?.toResponse() ?: throw e
+        }
+    }
 
     /**
      * TODO(learning) Phase 1 + 3 + 4 — Create order atomically.
@@ -53,7 +62,7 @@ class OrderService(
      * If any step fails, all three roll back.
      */
     @Transactional
-    fun create(userId: String, idempotencyKey: String, request: CreateOrderRequest): OrderResponse {
+    fun createInTx(userId: String, idempotencyKey: String, request: CreateOrderRequest): OrderResponse {
         val existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey)
         if (existing != null) return existing.toResponse()
 
