@@ -51,6 +51,7 @@ dependencies {
 	testImplementation("org.testcontainers:testcontainers-kafka")
 	testImplementation("org.testcontainers:testcontainers-postgresql")
 	testImplementation("io.mockk:mockk:1.14.5")
+	testImplementation("com.google.truth:truth:1.4.5")
 	testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
 	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

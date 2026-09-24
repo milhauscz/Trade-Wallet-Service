@@ -1,8 +1,23 @@
 package cz.cernilovsky.tradewalletservice.wallet
 
+import cz.cernilovsky.tradewalletservice.common.web.RequestHeaderConsts
 import cz.cernilovsky.tradewalletservice.support.BaseIntegrationTest
-import org.junit.jupiter.api.Disabled
+import cz.cernilovsky.tradewalletservice.support.TestAuth
+import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletRepository
 import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.http.HttpMethod
+import org.springframework.http.MediaType
+import org.springframework.security.oauth2.jwt.JwtEncoder
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request
+import java.math.BigDecimal
+import java.net.URI
+import java.util.*
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.stream.IntStream
+import kotlin.test.BeforeTest
+import kotlin.test.assertEquals
 
 /**
  * TODO(learning) Phase 1 + 5 — Prove pessimistic locking prevents double-spend.
@@ -33,9 +48,46 @@ import org.junit.jupiter.api.Test
  * If it deadlocks: lock order is wrong or you opened nested transactions that wait on
  * each other — keep a single `@Transactional` on `OrderService.create`.
  */
-class WalletConcurrencyIT : BaseIntegrationTest() {
+class WalletConcurrencyIT @Autowired constructor(
+    private val mockMvc: MockMvc,
+    private val walletRepository: WalletRepository,
+    private val jwtEncoder: JwtEncoder
+) : BaseIntegrationTest() {
+    @BeforeTest
+    fun resetWallet() {
+        val wallet = walletRepository.findByUserId("alice") ?: throw IllegalStateException("alice's wallet not found")
+        wallet.balance = BigDecimal(100)
+        wallet.reservedAmount = BigDecimal.ZERO
+        walletRepository.saveAndFlush(wallet)
+    }
+
     @Test
-    @Disabled("TODO(learning): Phase 1 + 5 concurrent reserve")
     fun concurrentOrdersMustNotOverReserveWallet() {
+        val http201Count = AtomicInteger(0)
+        val http422Count = AtomicInteger(0)
+        val otherCount = AtomicInteger(0)
+        val authorization = TestAuth.bearerToken(jwtEncoder)
+        IntStream.range(0, 20).parallel().forEach {
+            val status = mockMvc.request(
+                HttpMethod.POST,
+                URI("/api/v1/orders")
+            ) {
+                configureHeaders(authorization)
+                content = """{"symbol":"AAPL","price":10,"quantity":1}"""
+            }.andReturn().response.status
+            when (status) {
+                201 -> http201Count.incrementAndGet()
+                422 -> http422Count.incrementAndGet()
+                else -> otherCount.incrementAndGet()
+            }
+        }
+        assertEquals(10, http201Count.get())
+        assertEquals(10, http422Count.get())
+        assertEquals(0, otherCount.get())
+        with(walletRepository.findByUserId("alice")!!) {
+            assertEquals(0, BigDecimal(100).compareTo(reservedAmount))
+            assertEquals(0, BigDecimal(100).compareTo(balance))
+            assertEquals(0, BigDecimal(0).compareTo( available()))
+        }
     }
 }

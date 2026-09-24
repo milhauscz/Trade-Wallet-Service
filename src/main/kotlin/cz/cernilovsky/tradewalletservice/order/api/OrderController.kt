@@ -1,6 +1,7 @@
 package cz.cernilovsky.tradewalletservice.order.api
 
 import cz.cernilovsky.tradewalletservice.common.security.CurrentUser
+import cz.cernilovsky.tradewalletservice.common.web.RequestHeaderConsts
 import cz.cernilovsky.tradewalletservice.order.domain.OrderService
 import jakarta.validation.Valid
 import org.springframework.http.HttpStatus
@@ -24,7 +25,7 @@ class OrderController(
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     fun create(
-        @RequestHeader("X-Idempotency-Key") idempotencyKey: String,
+        @RequestHeader(RequestHeaderConsts.X_IDEMPOTENCY_KEY) idempotencyKey: String,
         @Valid @RequestBody request: CreateOrderRequest,
     ): OrderResponse = orderService.create(currentUser.userId(), idempotencyKey, request)
 
