@@ -1,6 +1,7 @@
 package cz.cernilovsky.tradewalletservice.wallet
 
 import com.google.common.truth.Truth.assertThat
+import cz.cernilovsky.tradewalletservice.common.exception.BadRequestException
 import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsException
 import cz.cernilovsky.tradewalletservice.wallet.domain.WalletService
 import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletEntity
@@ -58,6 +59,37 @@ class WalletServiceTest {
 
         assertThrows<InsufficientFundsException> {
             walletService.reserve("5", BigDecimal(10), BigDecimal(7))
+        }
+
+        assertThat(entity.reservedAmount).isEqualToIgnoringScale(BigDecimal(40))
+        verify(exactly = 1) { walletRepository.findByUserIdForUpdate("5") }
+        verify(exactly = 0) { walletRepository.findByUserId("5") }
+        verify(exactly = 0) { walletRepository.save(any()) }
+        confirmVerified(walletRepository)
+    }
+
+    @Test
+    fun releaseDecreasesReservedAmount() {
+        val entity = walletWithReserved(BigDecimal(90))
+        every { walletRepository.findByUserIdForUpdate(any()) } returns entity
+        every { walletRepository.save(any()) } answers { firstArg() }
+
+        walletService.release("5", BigDecimal(50))
+
+        assertThat(entity.reservedAmount).isEqualToIgnoringScale(BigDecimal(40))
+        verify(exactly = 1) { walletRepository.findByUserIdForUpdate("5") }
+        verify(exactly = 0) { walletRepository.findByUserId("5") }
+        verify(exactly = 1) { walletRepository.save(any()) }
+        confirmVerified(walletRepository)
+    }
+
+    @Test
+    fun releaseThrowsWhenAmountExceedsReserved() {
+        val entity = walletWithReserved(BigDecimal(40))
+        every { walletRepository.findByUserIdForUpdate(any()) } returns entity
+
+        assertThrows<BadRequestException> {
+            walletService.release("5", BigDecimal(50))
         }
 
         assertThat(entity.reservedAmount).isEqualToIgnoringScale(BigDecimal(40))

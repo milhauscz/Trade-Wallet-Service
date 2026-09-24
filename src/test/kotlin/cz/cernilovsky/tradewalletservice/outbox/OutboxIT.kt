@@ -61,7 +61,7 @@ class OutboxIT @Autowired constructor(
 ) : BaseIntegrationTest() {
     @Test
     fun createdOrderWritesOutboxAndIsPublishedToKafka() {
-        val consumer = ordersConsumerAtEnd()
+        val consumer = consumerAtEnd("orders")
         consumer.use { consumer ->
             val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
             val result = postOrder(
@@ -100,6 +100,28 @@ class OutboxIT @Autowired constructor(
         assertThat(outboxEventRepository.count()).isEqualTo(outboxCountBefore)
     }
 
+    @Test
+    fun poisonOrderIsPublishedToDeadLetterTopic() {
+        val consumer = consumerAtEnd("orders.DLT")
+        consumer.use {
+            val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
+            val result = postOrder(
+                authorization,
+                CreateOrderRequest("FAIL-DLT", BigDecimal(10), BigDecimal(1)),
+            )
+            assertThat(result.response.status).isEqualTo(HttpStatus.CREATED.value())
+            val orderResponse = objectMapper.readValue(result.response.contentAsString, OrderResponse::class.java)
+            assertThat(waitUntilPublished(orderResponse.id.toString()).publishedAt).isNotNull()
+
+            val records = KafkaTestUtils.getRecords(consumer, Duration.ofSeconds(15))
+                .filter { it.key() == orderResponse.id.toString() }
+            assertThat(records).hasSize(1)
+            val event = objectMapper.readValue(records.single().value(), OrderCreatedEvent::class.java)
+            assertThat(event.orderId).isEqualTo(orderResponse.id)
+            assertThat(event.symbol).isEqualTo("FAIL-DLT")
+        }
+    }
+
     private fun postOrder(
         authorization: String,
         request: CreateOrderRequest,
@@ -121,9 +143,9 @@ class OutboxIT @Autowired constructor(
         event
     }
 
-    private fun ordersConsumerAtEnd(): Consumer<String, String> {
+    private fun consumerAtEnd(topic: String): Consumer<String, String> {
         val consumer = consumerFactory.createConsumer("outbox-it-${UUID.randomUUID()}", null)
-        val partitions = consumer.partitionsFor("orders").map { TopicPartition("orders", it.partition()) }
+        val partitions = consumer.partitionsFor(topic).map { TopicPartition(topic, it.partition()) }
         consumer.assign(partitions)
         consumer.seekToEnd(partitions)
         consumer.poll(Duration.ofMillis(500))

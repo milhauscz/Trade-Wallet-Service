@@ -1,7 +1,7 @@
 package cz.cernilovsky.tradewalletservice.wallet.domain
 
+import cz.cernilovsky.tradewalletservice.common.exception.BadRequestException
 import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsException
-import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import cz.cernilovsky.tradewalletservice.wallet.api.WalletResponse
 import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletEntity
@@ -25,8 +25,6 @@ class WalletService(
     }
 
     /**
-     * TODO(learning) Phase 1 — Reserve funds with pessimistic locking.
-     *
      * Goal: concurrent order creates for the same user must never push `reservedAmount`
      * above `balance` (double-spend).
      *
@@ -57,11 +55,21 @@ class WalletService(
     }
 
     /**
-     * TODO(learning) Phase 1 (optional follow-up): release reserved funds when an order is cancelled.
-     * Same locking rules as `reserve` — `FOR UPDATE`, then subtract from `reservedAmount`.
+     * Release reserved funds when an order is cancelled.
+     * Same locking rules as [reserve]: `FOR UPDATE`, then subtract from `reservedAmount`.
      */
+    @Transactional
     fun release(userId: String, amount: BigDecimal) {
-        throw NotImplementedYetException("WalletService.release")
+        val wallet = walletRepository.findByUserIdForUpdate(userId)
+            ?: throw ResourceNotFoundException("Wallet", userId)
+        if (amount.signum() <= 0) {
+            throw BadRequestException("Release amount must be positive")
+        }
+        if (wallet.reservedAmount < amount) {
+            throw BadRequestException("Cannot release $amount; reserved is ${wallet.reservedAmount}")
+        }
+        wallet.reservedAmount -= amount
+        walletRepository.save(wallet)
     }
 
     private fun requireWallet(userId: String): WalletEntity =
