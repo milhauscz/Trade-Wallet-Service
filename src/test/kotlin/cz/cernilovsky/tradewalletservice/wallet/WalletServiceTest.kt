@@ -17,17 +17,7 @@ import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
 import java.math.BigDecimal
 
-/**
- * TODO(learning) Phase 1 — Unit-test reserve math without a database.
- *
- * After you add `findByUserIdForUpdate` and implement `WalletService.reserve`:
- * - Mock the repository to return a wallet with `balance=100`, `reservedAmount=40`.
- * - `reserve(price=10, quantity=5)` → reserved becomes 90, return value 50.
- * - `reserve(price=10, quantity=7)` → `InsufficientFundsException` (available 60 < 70).
- * - Verify `findByUserIdForUpdate` was called, `findByUserId` was **not**.
- *
- * Use MockK: `every { walletRepository.findByUserIdForUpdate("alice") } returns wallet`
- */
+// Reserve and release math without a database.
 @ExtendWith(MockKExtension::class)
 class WalletServiceTest {
     @MockK

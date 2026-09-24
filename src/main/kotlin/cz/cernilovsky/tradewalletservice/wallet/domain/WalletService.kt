@@ -25,26 +25,8 @@ class WalletService(
         return walletRepository.save(wallet).toResponse()
     }
 
-    /**
-     * Goal: concurrent order creates for the same user must never push `reservedAmount`
-     * above `balance` (double-spend).
-     *
-     * Implement:
-     * 1. Annotate this method with `@Transactional` (default `Propagation.REQUIRED`).
-     *    `OrderService.create` will call it inside the same transaction.
-     * 2. Load the wallet with `findByUserIdForUpdate(userId)` — this is the `FOR UPDATE` lock.
-     *    If missing, throw `ResourceNotFoundException("Wallet", userId)`.
-     * 3. Compute `required = price * quantity` using `BigDecimal` (`multiply`).
-     * 4. If `wallet.available() < required`, throw `InsufficientFundsException`.
-     * 5. `wallet.reservedAmount += required` and `save`.
-     * 6. Return the reserved amount so the caller can store it on the order if needed.
-     *
-     * Do **not** call Kafka from here. Do **not** use `@Lock` on the service. The lock belongs
-     * on the repository query.
-     *
-     * Interview check: two threads entering this method for the same `userId` — the second
-     * waits on the row lock until the first transaction commits or rolls back.
-     */
+    // Locks the wallet row and reserves price * quantity. Returns that amount.
+    // Throws InsufficientFundsException when available balance is too low.
     @Transactional
     fun reserve(userId: String, price: BigDecimal, quantity: BigDecimal): BigDecimal {
         val wallet = walletRepository.findByUserIdForUpdate(userId) ?: throw ResourceNotFoundException("Wallet", userId)
@@ -55,10 +37,7 @@ class WalletService(
         return required
     }
 
-    /**
-     * Release reserved funds when an order is cancelled.
-     * Same locking rules as [reserve]: `FOR UPDATE`, then subtract from `reservedAmount`.
-     */
+    // Locks the wallet row and subtracts a positive amount from reservedAmount.
     @Transactional
     fun release(userId: String, amount: BigDecimal) {
         val wallet = walletRepository.findByUserIdForUpdate(userId)

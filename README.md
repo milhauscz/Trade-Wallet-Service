@@ -1,70 +1,84 @@
 # Trade Wallet Service
 
-Kotlin / Spring Boot 4 service that models a **trading wallet**: reserve funds when an order is placed, detect concurrent order edits, publish domain events reliably, and reject duplicate client retries.
+Kotlin service that reserves trading funds when an order is placed, rejects lost updates, and publishes `OrderCreatedEvent` only after the database commit. Duplicate client retries return the original order instead of reserving twice.
 
-Built as a public portfolio project for senior backend interviews (locking, outbox, Kafka, idempotency). Matching is intentionally out of scope — an order reserves money and emits `OrderCreatedEvent`.
-
-## Stack
-
-- Java 21, Kotlin 2.3, Spring Boot 4.1
-- Spring Web MVC, Spring Data JPA, Bean Validation
-- PostgreSQL 16 + Flyway
-- Redis 7 (idempotency response cache)
-- Apache Kafka (KRaft, no ZooKeeper) + transactional outbox
-- Spring Security (JWT HS256 resource server)
-- JUnit 5, MockK, Testcontainers
+An order is a reservation plus an event. Matching and execution are out of scope.
 
 ## Architecture
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant Api as SpringAPI
-    participant Redis
-    participant Db as PostgreSQL
-    participant Outbox as OutboxRelay
-    participant Kafka
-    participant Dlt as orders_DLT
+flowchart LR
+    Client[Client]
+    Security[JWT resource server]
+    Idem[Idempotency filter]
+    Redis[(Redis)]
+    Orders[OrderService]
+    Wallet[WalletService]
+    Db[(PostgreSQL)]
+    Outbox[Outbox relay]
+    Kafka[Kafka topic orders]
+    Listener[Notification listener]
+    Dlt[orders.DLT]
 
-    Client->>Api: POST /orders + JWT + X-Idempotency-Key
-    Api->>Redis: GET or SET NX idempotency
-    alt duplicate key
-        Redis-->>Client: cached HTTP response
-    else first request
-        Api->>Db: TX lock wallet, insert order, insert outbox
-        Db-->>Api: commit
-        Api->>Redis: store response
-        Outbox->>Db: poll unpublished
-        Outbox->>Kafka: OrderCreatedEvent
-        Kafka-->>Api: NotificationListener
-        Note over Kafka,Dlt: listener failure after retries to DLT
-    end
+    Client --> Security --> Idem
+    Idem <--> Redis
+    Idem --> Orders
+    Orders --> Wallet
+    Orders --> Db
+    Wallet --> Db
+    Outbox --> Db
+    Outbox --> Kafka --> Listener
+    Listener --> Dlt
 ```
 
-Two layers of idempotency (say this in interviews):
+One `POST /api/v1/orders` does three things in a single database transaction:
 
-1. **Redis** — fast replay of the original HTTP body (`SET NX` + TTL).
-2. **PostgreSQL** — `UNIQUE (user_id, idempotency_key)` on `orders`, written in the **same transaction** as the wallet reservation and outbox row. Redis is not the source of truth.
+1. `SELECT … FOR UPDATE` on the user's wallet, then increase `reservedAmount` by `price * quantity`.
+2. Insert the order. `(user_id, idempotency_key)` is unique.
+3. Insert an outbox row with the JSON event. Kafka is not called here.
 
-Outbox exists because `KafkaTemplate.send` inside `@Transactional` is a classic failure mode: the broker and the database do not share a commit.
+After commit, a scheduled relay publishes unpublished rows. The message key is the order id, so events for one order stay in order. The listener acknowledges per record. A poison payload (`symbol = FAIL-DLT`) is retried three times and then written to `orders.DLT`.
+
+A retried POST is answered from Redis when the response is still cached. If Redis was flushed, the unique key still returns the existing order and does not reserve again. A second request that arrives while the first is running gets `409 IDEMPOTENCY_IN_PROGRESS`.
+
+`PATCH` of a pending order carries the client's `version`. Hibernate updates with `WHERE version = ?`. A stale version is `409 OPTIMISTIC_LOCK` and does not change the wallet. A successful price change reserves or releases the difference `(newPrice - oldPrice) * quantity` in the same transaction.
+
+## Technologies
+
+| Technology | Role |
+|---|---|
+| Kotlin 2.3, Java 21, Spring Boot 4.1 | Application runtime |
+| Spring Web MVC | REST API |
+| Spring Security OAuth2 resource server | Stateless JWT (HS256) on every route except token and health |
+| Spring Data JPA / Hibernate | Persistence, `PESSIMISTIC_WRITE` on the wallet, `@Version` on the order |
+| PostgreSQL 16 | Wallets, orders, outbox. Flyway owns the schema |
+| Redis 7 | Idempotency cache: `SET NX` plus TTL. Not the source of truth |
+| Apache Kafka (KRaft) | `orders` topic and `orders.DLT` |
+| Spring `@Scheduled` | Outbox relay. Each publish uses `REQUIRES_NEW` |
+| Bean Validation | Request constraints |
+| JUnit 5, MockK, Google Truth, Testcontainers | Unit tests and integration tests against real Postgres, Redis, and Kafka |
 
 ## API
 
-Demo users: `alice` / `password`, `bob` / `password`. Seed wallets: **10 000 USD**.
+Demo users: `alice` / `password`, `bob` / `password`. Each wallet starts at **10 000 USD**.
 
-| Method | Path | Auth | Notes |
-|--------|------|------|--------|
-| POST | `/api/v1/auth/token` | no | `{ "username", "password" }` |
+| Method | Path | Auth | Behavior |
+|---|---|---|---|
+| POST | `/api/v1/auth/token` | no | `{ "username", "password" }` → access token |
 | GET | `/api/v1/wallets/me` | JWT | balance, reserved, available |
 | POST | `/api/v1/wallets/me/credit` | JWT | demo top-up |
-| POST | `/api/v1/orders` | JWT | requires `X-Idempotency-Key` |
-| GET | `/api/v1/orders/{id}` | JWT | |
-| PATCH | `/api/v1/orders/{id}` | JWT | body must include `version` |
-| GET | `/actuator/health` | no | |
+| POST | `/api/v1/orders` | JWT | requires `X-Idempotency-Key`. Reserves funds and returns 201 |
+| GET | `/api/v1/orders/{id}` | JWT | that user's order |
+| PATCH | `/api/v1/orders/{id}` | JWT | pending orders only; body includes `version` |
+| GET | `/actuator/health` | no | liveness |
 
-Until the learning TODOs are implemented, create/update order return **HTTP 501**.
-
-### Example
+| Status | Code | When |
+|---|---|---|
+| 409 | `OPTIMISTIC_LOCK` | PATCH used an old `version` |
+| 409 | `IDEMPOTENCY_IN_PROGRESS` | same key is already running |
+| 422 | `INSUFFICIENT_FUNDS` | reservation would exceed available balance |
+| 400 | `MISSING_HEADER` | `POST /orders` without `X-Idempotency-Key` |
+| 400 | `BAD_REQUEST` | order is not `PENDING`, or release amount is invalid |
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/token \
@@ -83,69 +97,45 @@ curl -X POST http://localhost:8080/api/v1/orders \
 
 ## Run locally
 
-Gradle downloads a **JDK 21** toolchain automatically (Foojay resolver). A newer JDK on the machine (for example Android Studio's JBR) is fine.
+Gradle downloads a JDK 21 toolchain (Foojay). On Windows, `run-local.bat` starts the infrastructure and then the app.
 
-Infrastructure only (app on the host with profile `local`):
+Infrastructure only, app on the host with profile `local`:
 
 ```bash
 docker compose up postgres redis kafka kafka-ui
 ./gradlew bootRun
 ```
 
-Everything, including the app:
+App and infrastructure together:
 
 ```bash
 docker compose up --build
 ```
 
-- API: <http://localhost:8080>
-- Kafka UI: <http://localhost:8081>
-- Postgres: `localhost:5432` / `trade` / `trade` / db `tradewallet`
-- Kafka from the host: `localhost:9092` (from other containers: `kafka:19092`)
+| | |
+|---|---|
+| API | http://localhost:8080 |
+| Kafka UI | http://localhost:8081 |
+| Postgres | `localhost:5432`, db `tradewallet`, user `trade`, password `trade` |
+| Kafka from the host | `localhost:9092` |
+| Kafka from other containers | `kafka:19092` |
 
-Tests (Docker required for Testcontainers):
+Tests need Docker:
 
 ```bash
 ./gradlew test
 ```
 
-## Learning path
-
-Business methods are left as `TODO(learning)` so you implement the interview-relevant parts. Follow this order; each class has detailed KDoc.
-
-1. **Pessimistic locking** — `WalletRepository`, `WalletService.reserve`, then `OrderService.create` (wallet + order in one `@Transactional`). Test: `WalletServiceTest`, `WalletConcurrencyIT`.
-2. **Optimistic locking** — `@Version` on `OrderEntity`, `OrderService.update`, HTTP 409 in `GlobalExceptionHandler`. Test: `OrderOptimisticLockIT`.
-3. **Outbox + Kafka + DLT** — `OutboxService.enqueue`, `OutboxRelay`, `@KafkaListener` on `OrderCreatedNotificationListener`. Test: `OutboxIT`.
-4. **Idempotency** — `RedisIdempotencyStore`, `IdempotencyFilter` (register **after** the JWT filter), unique key already in Flyway. Test: `IdempotencyIT`.
-5. **Enable the IT classes** — remove `@Disabled` and fill assertions.
-
-Do **not** send to Kafka from `OrderService`. Do **not** lock with `@Version` on the wallet (wrong tool). Do **not** treat Redis as the only duplicate guard.
-
-## Interview notes
-
-| Topic | What this repo demonstrates |
-|--------|-----------------------------|
-| `PESSIMISTIC_WRITE` | `SELECT … FOR UPDATE` on the wallet row; second TX waits; used for **balance invariants**. |
-| `@Version` | `UPDATE … WHERE version = ?`; 0 rows → `OptimisticLockingFailureException` → **HTTP 409**; used for **lost updates** on orders. |
-| `@Transactional` | `REQUIRED` for order+wallet+outbox; `REQUIRES_NEW` per outbox row in the relay so a Kafka failure does not undo a previous publish. |
-| Outbox | Event row commits with the aggregate; relay publishes after commit; at-least-once (consumers must be idempotent). |
-| Kafka | Partition key = `orderId`; record ack-mode; poison messages after 3 retries go to `orders.DLT`. |
-| Idempotency | Redis `SET NX` for replay; DB unique constraint for correctness after cache loss. |
-
 ## Layout
 
 ```
 cz.cernilovsky.tradewalletservice
-  config/          Security, Kafka topics + DLT error handler, typed properties
-  common/          API errors, exception handler (409 left for you)
-  wallet/          Entity, repository, service, controller
-  order/           Entity, repository, service, controller
-  outbox/          Entity, enqueue service, scheduled relay
-  messaging/       OrderCreatedEvent, notification listener stub
-  idempotency/     Redis store + filter stubs
-  security/        Demo JWT token endpoint
+  config/        security filter chain, Kafka topics, DLT error handler, typed properties
+  common/        API errors and exception mapping
+  security/      demo token endpoint
+  wallet/        balance, pessimistic reservation
+  order/         create and versioned update
+  outbox/        enqueue in the request transaction, relay after commit
+  messaging/     OrderCreatedEvent and the notification listener
+  idempotency/   Redis store and the filter registered after JWT authentication
 ```
-
-## What is deliberately unfinished
-
-`WalletService.reserve`, `OrderService.create` / `update`, outbox publish loop, Kafka listener, idempotency filter/store, 409 mapping, and the integration test bodies. That is the learning core, not missing product work.

@@ -1,7 +1,7 @@
 package cz.cernilovsky.tradewalletservice.common.exception
 
 class NotImplementedYetException(feature: String) :
-    RuntimeException("TODO(learning): implement $feature")
+    RuntimeException("Not implemented: $feature")
 
 class ResourceNotFoundException(resource: String, id: Any) :
     RuntimeException("$resource '$id' was not found")

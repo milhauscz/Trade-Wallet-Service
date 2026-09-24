@@ -6,7 +6,6 @@ import cz.cernilovsky.tradewalletservice.common.exception.InsufficientFundsExcep
 import cz.cernilovsky.tradewalletservice.common.exception.NotImplementedYetException
 import cz.cernilovsky.tradewalletservice.common.exception.ResourceNotFoundException
 import jakarta.validation.ConstraintViolationException
-import org.hibernate.annotations.OptimisticLocking
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.orm.ObjectOptimisticLockingFailureException
@@ -50,21 +49,12 @@ class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "Request validation failed", details)
     }
 
+    // Stale @Version on an order: client should reload and retry with the current version.
     @ExceptionHandler(ObjectOptimisticLockingFailureException::class)
     fun handleOptimisticLockingException(ex: ObjectOptimisticLockingFailureException): ResponseEntity<ApiError> {
         return error(HttpStatus.CONFLICT, "OPTIMISTIC_LOCK", "Reload the order and retry with the current version")
     }
 
-    /**
-     * TODO(learning) Phase 2 — Optimistic locking HTTP 409:
-     *
-     * 1. Import `org.springframework.orm.ObjectOptimisticLockingFailureException`
-     *    (or `org.springframework.dao.OptimisticLockingFailureException`).
-     * 2. Add `@ExceptionHandler` for that type.
-     * 3. Return HTTP 409 Conflict with code `OPTIMISTIC_LOCK` and a message telling the
-     *    client to reload the order and retry with the current `version`.
-     * 4. Do **not** catch it inside `OrderService.update` — let it bubble to this advice.
-     */
     private fun error(
         status: HttpStatus,
         code: String,

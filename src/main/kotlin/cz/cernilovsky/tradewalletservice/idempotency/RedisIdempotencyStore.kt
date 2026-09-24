@@ -12,33 +12,15 @@ class RedisIdempotencyStore(
     private val properties: IdempotencyProperties,
     private val objectMapper: ObjectMapper
 ) : IdempotencyStore {
-    /**
-     * TODO(learning) Phase 4 — Redis response cache.
-     *
-     * Key design: `idempotency:{userId}:{key}` so Alice cannot replay Bob's response.
-     * TTL: `properties.ttl` (24h in config).
-     *
-     * `get`: `opsForValue().get(redisKey)` and deserialize JSON to `CachedHttpResponse`.
-     * Store status/body/contentType as JSON (or three hash fields). Keep it simple: one JSON string.
-     *
-     * `tryBegin`: `SET key "in-progress" NX EX ttl`. In Spring Data Redis:
-     * `redis.opsForValue().setIfAbsent(redisKey, IN_PROGRESS, properties.ttl)`.
-     * Return true when the SET happened (this request owns the work).
-     * Return false when the key already exists (duplicate or in-flight).
-     *
-     * `save`: overwrite the key with the final JSON response and the same TTL
-     * (`set(key, json, ttl)` — not NX, you already own it).
-     *
-     * Redis is **not** the source of truth. `orders(user_id, idempotency_key)` UNIQUE is.
-     * If Redis is flushed, a retry hits the unique constraint / `findByUserIdAndIdempotencyKey`
-     * in `OrderService.create` and still must not create a second order.
-     */
+    // Returns a cached HTTP response for idempotency:{userId}:{key}.
+    // An in-progress sentinel is not a replay and returns null.
     override fun get(userId: String, key: String): CachedHttpResponse? {
         val value = redis.opsForValue().get(createRedisKey(userId, key)) ?: return null
         if (value == IDEMPOTENT_OPERATION_IN_PROGRESS_VALUE) return null
         return objectMapper.readValue(value, CachedHttpResponse::class.java)
     }
 
+    // Claims the key with SET NX. False means another request already owns it.
     override fun tryBegin(userId: String, key: String): Boolean {
         return redis.opsForValue().setIfAbsent(
             createRedisKey(userId, key),
@@ -47,6 +29,7 @@ class RedisIdempotencyStore(
         )
     }
 
+    // Caches 2xx and 4xx for the configured TTL. Deletes the key on 5xx so the client can retry.
     override fun processResponse(userId: String, key: String, response: CachedHttpResponse) {
         val redisKey = createRedisKey(userId, key)
         with(HttpStatusCode.valueOf(response.status)) {

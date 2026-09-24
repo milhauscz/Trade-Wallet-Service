@@ -13,6 +13,7 @@ class OutboxRelayPublisher(
     private val outboxEventRepository: OutboxEventRepository,
     private val kafkaTemplate: KafkaTemplate<String, String>,
 ) {
+    // Sends the payload to Kafka with aggregateId as the key, then marks the row published.
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     fun publishEvent(event: OutboxEventEntity) {
         kafkaTemplate.send(event.topic, event.aggregateId, event.payload).get()
