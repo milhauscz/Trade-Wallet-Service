@@ -5,7 +5,6 @@ import cz.cernilovsky.tradewalletservice.order.api.CreateOrderRequest
 import cz.cernilovsky.tradewalletservice.order.api.OrderResponse
 import cz.cernilovsky.tradewalletservice.support.BaseIntegrationTest
 import cz.cernilovsky.tradewalletservice.support.TestAuth
-import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletRepository
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.data.redis.core.StringRedisTemplate
@@ -13,14 +12,15 @@ import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
 import org.springframework.security.oauth2.jwt.JwtEncoder
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.MvcResult
 import org.springframework.test.web.servlet.request
 import tools.jackson.databind.ObjectMapper
 import java.math.BigDecimal
 import java.net.URI
-import java.util.*
+import java.util.Collections
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.stream.IntStream
-import kotlin.test.assertEquals
 
 /**
  * TODO(learning) Phase 4 + 5 — Idempotency key replays the original response.
@@ -48,96 +48,105 @@ class IdempotencyIT @Autowired constructor(
     private val mockMvc: MockMvc,
     private val objectMapper: ObjectMapper,
     private val redis: StringRedisTemplate,
-    private val walletRepository: WalletRepository
 ) : BaseIntegrationTest() {
     @Test
-    fun duplicateIdempotencyKeyDoesNotCreateSecondOrder() {
+    fun retryWithSameKeyReplaysTheOriginalOrder() {
         val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
-        var idempotencyKey = UUID.randomUUID().toString()
+        val idempotencyKey = UUID.randomUUID().toString()
+        val orderRequest = sampleOrder()
 
-        // 1. CREATE AN ORDER
-        val orderRequest = CreateOrderRequest(
-            symbol = "BTC",
-            price = BigDecimal(54),
-            quantity = BigDecimal(17)
-        )
-        val result = mockMvc.request(
-            HttpMethod.POST,
-            URI("/api/v1/orders")
-        ) {
-            configureHeaders(authorization, idempotencyKey = idempotencyKey)
-            content = objectMapper.writeValueAsString(orderRequest)
-        }.andReturn()
-        assertEquals(HttpStatus.CREATED.value(), result.response.status)
-        val orderResponse = objectMapper.readValue(result.response.contentAsString, OrderResponse::class.java)
-        val reservedAmountAfterInitialOrder = walletRepository.findByUserId("alice")!!.reservedAmount
+        val created = postOrder(authorization, idempotencyKey, orderRequest)
+        assertThat(created.response.status).isEqualTo(HttpStatus.CREATED.value())
+        val orderResponse = readOrder(created)
+        val reservedAfterCreate = aliceReservedAmount()
 
-        // 2. SEND A DUPLICATE REQUEST
-        var duplicateResult = mockMvc.request(
-            HttpMethod.POST,
-            URI("/api/v1/orders")
-        ) {
-            configureHeaders(authorization, idempotencyKey = idempotencyKey)
-            content = objectMapper.writeValueAsString(orderRequest)
-        }.andReturn()
-        assertEquals(HttpStatus.CREATED.value(), duplicateResult.response.status)
-        var duplicateOrderResponse = objectMapper.readValue(duplicateResult.response.contentAsString, OrderResponse::class.java)
-        assertThat(duplicateOrderResponse.id).isEqualTo(orderResponse.id)
-        assertThat(duplicateOrderResponse.price).isEquivalentAccordingToCompareTo(orderResponse.price)
-        assertThat(duplicateOrderResponse.quantity).isEquivalentAccordingToCompareTo(orderResponse.quantity)
-        assertThat(walletRepository.findByUserId("alice")!!.reservedAmount).isEqualTo(reservedAmountAfterInitialOrder)
+        val replay = postOrder(authorization, idempotencyKey, orderRequest)
+        assertThat(replay.response.status).isEqualTo(HttpStatus.CREATED.value())
+        assertSameOrder(readOrder(replay), orderResponse)
+        assertThat(aliceReservedAmount()).isEqualTo(reservedAfterCreate)
+    }
 
-        // 3. FLUSH REDIS AND MAKE A DUPLICATE AGAIN
-        redis.execute { connection ->
-            connection.serverCommands().flushAll()
-        }
-        duplicateResult = mockMvc.request(
-            HttpMethod.POST,
-            URI("/api/v1/orders")
-        ) {
-            configureHeaders(authorization, idempotencyKey = idempotencyKey)
-            content = objectMapper.writeValueAsString(orderRequest)
-        }.andReturn()
-        assertEquals(HttpStatus.CREATED.value(), duplicateResult.response.status)
-        duplicateOrderResponse = objectMapper.readValue(duplicateResult.response.contentAsString, OrderResponse::class.java)
-        assertThat(duplicateOrderResponse.id).isEqualTo(orderResponse.id)
-        assertThat(duplicateOrderResponse.price).isEquivalentAccordingToCompareTo(orderResponse.price)
-        assertThat(duplicateOrderResponse.quantity).isEquivalentAccordingToCompareTo(orderResponse.quantity)
-        assertThat(walletRepository.findByUserId("alice")!!.reservedAmount).isEqualTo(reservedAmountAfterInitialOrder)
+    @Test
+    fun retryAfterRedisFlushStillReturnsTheSameOrder() {
+        val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
+        val idempotencyKey = UUID.randomUUID().toString()
+        val orderRequest = sampleOrder()
 
-        // 4. TWO PARALLEL DUPLICATE POSTS
+        val created = postOrder(authorization, idempotencyKey, orderRequest)
+        assertThat(created.response.status).isEqualTo(HttpStatus.CREATED.value())
+        val orderResponse = readOrder(created)
+        val reservedAfterCreate = aliceReservedAmount()
+
+        redis.execute { connection -> connection.serverCommands().flushAll() }
+
+        val replay = postOrder(authorization, idempotencyKey, orderRequest)
+        assertThat(replay.response.status).isEqualTo(HttpStatus.CREATED.value())
+        assertSameOrder(readOrder(replay), orderResponse)
+        assertThat(aliceReservedAmount()).isEqualTo(reservedAfterCreate)
+    }
+
+    @Test
+    fun parallelPostsWithSameKeyReserveFundsOnce() {
+        val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
+        val idempotencyKey = UUID.randomUUID().toString()
+        val orderRequest = sampleOrder()
+        val reservedBefore = aliceReservedAmount()
         val createdCount = AtomicInteger(0)
         val inProgressCount = AtomicInteger(0)
         val ids = Collections.synchronizedList(mutableListOf<UUID>())
 
-        idempotencyKey = UUID.randomUUID().toString()
         IntStream.range(0, 2).parallel().forEach {
-            val parallelResult = mockMvc.request(
-                HttpMethod.POST,
-                URI("/api/v1/orders")
-            ) {
-                configureHeaders(authorization, idempotencyKey = idempotencyKey)
-                content = objectMapper.writeValueAsString(orderRequest)
-            }.andReturn()
+            val parallelResult = postOrder(authorization, idempotencyKey, orderRequest)
             when (parallelResult.response.status) {
-                201 -> {
+                HttpStatus.CREATED.value() -> {
                     createdCount.incrementAndGet()
-                    val parallelOrderResponse = objectMapper.readValue(parallelResult.response.contentAsString, OrderResponse::class.java)
-                    ids.add(parallelOrderResponse.id)
+                    ids.add(readOrder(parallelResult).id)
                 }
-                409 -> inProgressCount.incrementAndGet()
+                HttpStatus.CONFLICT.value() -> inProgressCount.incrementAndGet()
             }
         }
+
         if (createdCount.get() == 2) {
-            assertThat(ids).hasSize(2)
             assertThat(inProgressCount.get()).isEqualTo(0)
-            assertThat(ids[0]).isEqualTo(ids[1])
+            assertThat(ids).containsExactly(ids.first(), ids.first())
         } else if (createdCount.get() == 1) {
             assertThat(inProgressCount.get()).isEqualTo(1)
             assertThat(ids).hasSize(1)
         } else {
             throw AssertionError("Unexpected created count: ${createdCount.get()}")
         }
-        assertThat(walletRepository.findByUserId("alice")!!.reservedAmount).isEqualToIgnoringScale(reservedAmountAfterInitialOrder + orderRequest.price * orderRequest.quantity)
+        assertThat(aliceReservedAmount()).isEqualToIgnoringScale(
+            reservedBefore + orderRequest.price * orderRequest.quantity
+        )
     }
+
+    private fun sampleOrder() = CreateOrderRequest(
+        symbol = "BTC",
+        price = BigDecimal(54),
+        quantity = BigDecimal(17),
+    )
+
+    private fun postOrder(
+        authorization: String,
+        idempotencyKey: String,
+        request: CreateOrderRequest,
+    ): MvcResult = mockMvc.request(
+        HttpMethod.POST,
+        URI("/api/v1/orders")
+    ) {
+        configureHeaders(authorization, idempotencyKey = idempotencyKey)
+        content = objectMapper.writeValueAsString(request)
+    }.andReturn()
+
+    private fun readOrder(result: MvcResult): OrderResponse =
+        objectMapper.readValue(result.response.contentAsString, OrderResponse::class.java)
+
+    private fun assertSameOrder(actual: OrderResponse, expected: OrderResponse) {
+        assertThat(actual.id).isEqualTo(expected.id)
+        assertThat(actual.price).isEquivalentAccordingToCompareTo(expected.price)
+        assertThat(actual.quantity).isEquivalentAccordingToCompareTo(expected.quantity)
+    }
+
+    private fun aliceReservedAmount(): BigDecimal =
+        walletRepository.findByUserId("alice")!!.reservedAmount
 }

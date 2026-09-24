@@ -1,23 +1,19 @@
 package cz.cernilovsky.tradewalletservice.wallet
 
-import cz.cernilovsky.tradewalletservice.common.web.RequestHeaderConsts
+import com.google.common.truth.Truth.assertThat
 import cz.cernilovsky.tradewalletservice.support.BaseIntegrationTest
 import cz.cernilovsky.tradewalletservice.support.TestAuth
-import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletRepository
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpMethod
-import org.springframework.http.MediaType
 import org.springframework.security.oauth2.jwt.JwtEncoder
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request
 import java.math.BigDecimal
 import java.net.URI
-import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.stream.IntStream
 import kotlin.test.BeforeTest
-import kotlin.test.assertEquals
 
 /**
  * TODO(learning) Phase 1 + 5 — Prove pessimistic locking prevents double-spend.
@@ -50,11 +46,10 @@ import kotlin.test.assertEquals
  */
 class WalletConcurrencyIT @Autowired constructor(
     private val mockMvc: MockMvc,
-    private val walletRepository: WalletRepository,
-    private val jwtEncoder: JwtEncoder
+    private val jwtEncoder: JwtEncoder,
 ) : BaseIntegrationTest() {
     @BeforeTest
-    fun resetWallet() {
+    fun resetWalletToSmallBalance() {
         val wallet = walletRepository.findByUserId("alice") ?: throw IllegalStateException("alice's wallet not found")
         wallet.balance = BigDecimal(100)
         wallet.reservedAmount = BigDecimal.ZERO
@@ -81,13 +76,12 @@ class WalletConcurrencyIT @Autowired constructor(
                 else -> otherCount.incrementAndGet()
             }
         }
-        assertEquals(10, http201Count.get())
-        assertEquals(10, http422Count.get())
-        assertEquals(0, otherCount.get())
-        with(walletRepository.findByUserId("alice")!!) {
-            assertEquals(0, BigDecimal(100).compareTo(reservedAmount))
-            assertEquals(0, BigDecimal(100).compareTo(balance))
-            assertEquals(0, BigDecimal(0).compareTo( available()))
-        }
+        assertThat(http201Count.get()).isEqualTo(10)
+        assertThat(http422Count.get()).isEqualTo(10)
+        assertThat(otherCount.get()).isEqualTo(0)
+        val wallet = walletRepository.findByUserId("alice")!!
+        assertThat(wallet.reservedAmount).isEqualToIgnoringScale(BigDecimal(100))
+        assertThat(wallet.balance).isEqualToIgnoringScale(BigDecimal(100))
+        assertThat(wallet.available()).isEqualToIgnoringScale(BigDecimal.ZERO)
     }
 }

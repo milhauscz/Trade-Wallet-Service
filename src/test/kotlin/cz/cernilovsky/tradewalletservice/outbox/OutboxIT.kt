@@ -1,15 +1,15 @@
 package cz.cernilovsky.tradewalletservice.outbox
 
+import com.google.common.truth.Truth.assertThat
 import cz.cernilovsky.tradewalletservice.messaging.OrderCreatedEvent
 import cz.cernilovsky.tradewalletservice.order.api.CreateOrderRequest
 import cz.cernilovsky.tradewalletservice.order.api.OrderResponse
 import cz.cernilovsky.tradewalletservice.outbox.persistence.OutboxEventRepository
 import cz.cernilovsky.tradewalletservice.support.BaseIntegrationTest
 import cz.cernilovsky.tradewalletservice.support.TestAuth
+import org.apache.kafka.clients.consumer.Consumer
 import org.apache.kafka.common.TopicPartition
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.assertNotNull
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpMethod
 import org.springframework.http.HttpStatus
@@ -57,69 +57,76 @@ class OutboxIT @Autowired constructor(
     private val mockMvc: MockMvc,
     private val jwtEncoder: JwtEncoder,
     private val objectMapper: ObjectMapper,
-    private val consumerFactory: ConsumerFactory<String,String>
+    private val consumerFactory: ConsumerFactory<String, String>,
 ) : BaseIntegrationTest() {
     @Test
     fun createdOrderWritesOutboxAndIsPublishedToKafka() {
-        // Go to the end of the queue to ignore old records from other tests
+        val consumer = ordersConsumerAtEnd()
+        consumer.use { consumer ->
+            val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
+            val result = postOrder(
+                authorization,
+                CreateOrderRequest("BTC", BigDecimal(100), BigDecimal(2)),
+            )
+            assertThat(result.response.status).isEqualTo(HttpStatus.CREATED.value())
+            val orderResponse = objectMapper.readValue(result.response.contentAsString, OrderResponse::class.java)
+
+            val published = waitUntilPublished(orderResponse.id.toString())
+            assertThat(published.publishedAt).isNotNull()
+
+            val records = KafkaTestUtils.getRecords(consumer, Duration.ofSeconds(5))
+                .filter { it.key() == orderResponse.id.toString() }
+            assertThat(records).hasSize(1)
+            val record = records.single()
+            val orderCreatedEventFromKafka = objectMapper.readValue(record.value(), OrderCreatedEvent::class.java)
+            val orderFromOutbox = objectMapper.readValue(published.payload, OrderCreatedEvent::class.java)
+            assertThat(orderCreatedEventFromKafka).isEqualTo(orderFromOutbox)
+            assertThat(record.key()).isEqualTo(orderCreatedEventFromKafka.orderId.toString())
+            assertThat(published.aggregateId).isEqualTo(orderResponse.id.toString())
+        }
+    }
+
+    @Test
+    fun failedReserveDoesNotWriteOutboxOrPublish() {
+        val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
+        val outboxCountBefore = outboxEventRepository.count()
+
+        val overReserve = postOrder(
+            authorization,
+            CreateOrderRequest("BTC", BigDecimal(100000000), BigDecimal(500)),
+        )
+
+        assertThat(overReserve.response.status).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY.value())
+        assertThat(outboxEventRepository.count()).isEqualTo(outboxCountBefore)
+    }
+
+    private fun postOrder(
+        authorization: String,
+        request: CreateOrderRequest,
+    ) = mockMvc.request(
+        HttpMethod.POST,
+        URI("/api/v1/orders")
+    ) {
+        configureHeaders(authorization)
+        content = objectMapper.writeValueAsString(request)
+    }.andReturn()
+
+    private fun waitUntilPublished(aggregateId: String) = run {
+        val deadline = Clock.System.now().plus(5.seconds)
+        var event = outboxEventRepository.findAll().single { it.aggregateId == aggregateId }
+        while (event.publishedAt == null && Clock.System.now() < deadline) {
+            Thread.sleep(200)
+            event = outboxEventRepository.findAll().single { it.aggregateId == aggregateId }
+        }
+        event
+    }
+
+    private fun ordersConsumerAtEnd(): Consumer<String, String> {
         val consumer = consumerFactory.createConsumer("outbox-it-${UUID.randomUUID()}", null)
         val partitions = consumer.partitionsFor("orders").map { TopicPartition("orders", it.partition()) }
         consumer.assign(partitions)
         consumer.seekToEnd(partitions)
         consumer.poll(Duration.ofMillis(500))
-
-        // Make a POST request for creating an order
-        val authorization = TestAuth.bearerToken(jwtEncoder, "alice")
-        val result = mockMvc.request(
-            HttpMethod.POST,
-            URI("/api/v1/orders")
-        ) {
-            configureHeaders(authorization)
-            content = objectMapper.writeValueAsString(CreateOrderRequest(
-                "BTC",
-                BigDecimal(100),
-                BigDecimal(2)
-            ))
-        }.andReturn()
-
-        val orderResponse = objectMapper.readValue(result.response.contentAsString, OrderResponse::class.java)
-
-        // Check outbox service published the event to the repository and outbox relay published it to Kafka
-        // (publishedAt is set at that moment)
-        var orderOutboxEventEntity = outboxEventRepository.findAll().single { it.aggregateId == orderResponse.id.toString() }
-        val deadline = Clock.System.now().plus(5.seconds)
-        // outbox events are read and published to Kafka via @Scheduled function every second
-        while (orderOutboxEventEntity.publishedAt == null && Clock.System.now() < deadline) {
-            Thread.sleep(200)
-            orderOutboxEventEntity = outboxEventRepository.findAll().single { it.aggregateId == orderResponse.id.toString() }
-        }
-        assertNotNull(orderOutboxEventEntity.publishedAt)
-
-        // find the record in Kafka
-        val records = KafkaTestUtils.getRecords(consumer, Duration.ofSeconds(5))
-        assertThat(records.count()).isEqualTo(1)
-        val orderCreatedEventFromKafka = objectMapper.readValue(records.single().value(), OrderCreatedEvent::class.java)
-        val orderFromOutboxEventEntityPayload = objectMapper.readValue(orderOutboxEventEntity.payload, OrderCreatedEvent::class.java)
-        assertThat(orderCreatedEventFromKafka).isEqualTo(orderFromOutboxEventEntityPayload)
-        assertThat(records.single().key()).isEqualTo(orderCreatedEventFromKafka.orderId.toString())
-        assertThat(orderOutboxEventEntity.aggregateId).isEqualTo(orderResponse.id.toString())
-        consumer.close()
-
-        // try reserving too much
-        val outboxEventsBeforeOverReserve = outboxEventRepository.findAll()
-        val overReserve = mockMvc.request(
-            HttpMethod.POST,
-            URI("/api/v1/orders")
-        ) {
-            configureHeaders(authorization)
-            content = objectMapper.writeValueAsString(CreateOrderRequest(
-                "BTC",
-                BigDecimal(100000000),
-                BigDecimal(500)
-            ))
-        }.andReturn()
-
-        assertThat(overReserve.response.status).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY.value())
-        assertThat(outboxEventsBeforeOverReserve).hasSameSizeAs(outboxEventRepository.findAll())
+        return consumer
     }
 }
