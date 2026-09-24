@@ -1,5 +1,7 @@
 # Trade Wallet Service
 
+![Trade Wallet Service](docs/banner.png)
+
 Kotlin service that reserves trading funds when an order is placed, rejects lost updates, and publishes `OrderCreatedEvent` only after the database commit. Duplicate client retries return the original order instead of reserving twice.
 
 An order is a reservation plus an event. Matching and execution are out of scope.
