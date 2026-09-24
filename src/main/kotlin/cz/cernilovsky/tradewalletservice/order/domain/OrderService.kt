@@ -18,6 +18,7 @@ import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import tools.jackson.databind.ObjectMapper
+import java.math.BigDecimal
 import java.util.*
 
 @Service
@@ -95,8 +96,6 @@ class OrderService(
     }
 
     /**
-     * TODO(learning) Phase 2 — Update order with optimistic locking.
-     *
      * 1. Load the order with `findByIdAndUserId`. 404 if missing.
      * 2. Only allow updates while `status == PENDING`.
      * 3. Copy `request.version` onto `entity.version` **before** applying field changes.
@@ -122,10 +121,22 @@ class OrderService(
 
         entityManager.detach(order)
         order.version = request.version
+        val originalPrice = order.price
         request.price?.let { order.price = it }
         request.stopLoss?.let { order.stopLoss = it }
-        // we intentionally do not change wallet funds - lesson focused on locking
-        return orderRepository.saveAndFlush(order).toResponse()
+
+        val orderResponse = orderRepository.saveAndFlush(order).toResponse()
+
+        request.price?.let { updatePrice ->
+            val diff = (updatePrice - originalPrice) * order.quantity
+            when (diff.signum()) {
+                -1 -> walletService.release(userId,  diff.abs())
+                1 -> walletService.reserve(userId, diff, BigDecimal(1))
+            }
+        }
+
+        return orderResponse
+
     }
 
     private fun OrderEntity.toResponse() = OrderResponse(

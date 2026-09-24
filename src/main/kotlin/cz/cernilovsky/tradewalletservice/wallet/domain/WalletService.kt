@@ -9,6 +9,7 @@ import cz.cernilovsky.tradewalletservice.wallet.persistence.WalletRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
+import kotlin.plus
 
 @Service
 class WalletService(
@@ -49,7 +50,7 @@ class WalletService(
         val wallet = walletRepository.findByUserIdForUpdate(userId) ?: throw ResourceNotFoundException("Wallet", userId)
         val required = price * quantity
         if (wallet.available() < required) throw InsufficientFundsException(wallet.available().toString(), required.toString())
-        wallet.reservedAmount = wallet.reservedAmount.add(required)
+        wallet.reservedAmount += required
         walletRepository.save(wallet)
         return required
     }
